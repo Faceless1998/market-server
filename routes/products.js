@@ -10,10 +10,8 @@ const { protect } = require('../middleware/auth');
 const storage = multer.diskStorage({
   destination: function (req, file, cb) {
     const uploadDir = path.join(__dirname, '..', 'uploads');
-    // Create uploads directory if it doesn't exist
     if (!fs.existsSync(uploadDir)) {
-      fs.mkdirSync(uploadDir);
-      console.log('Created uploads directory at:', uploadDir);
+      fs.mkdirSync(uploadDir, { recursive: true });
     }
     cb(null, uploadDir);
   },
@@ -23,17 +21,20 @@ const storage = multer.diskStorage({
   }
 });
 
+const fileFilter = (req, file, cb) => {
+  if (file.mimetype.startsWith('image/')) {
+    cb(null, true);
+  } else {
+    cb(new Error('Not an image! Please upload only images.'), false);
+  }
+};
+
 const upload = multer({
   storage: storage,
   limits: {
     fileSize: 5 * 1024 * 1024 // 5MB limit
   },
-  fileFilter: function (req, file, cb) {
-    if (!file.originalname.match(/\.(jpg|jpeg|png|gif)$/)) {
-      return cb(new Error('Only image files are allowed!'), false);
-    }
-    cb(null, true);
-  }
+  fileFilter: fileFilter
 });
 
 // Serve static files from uploads directory
@@ -71,18 +72,9 @@ router.get('/my-store', protect, async (req, res) => {
 // Create a new product
 router.post('/', protect, upload.single('image'), async (req, res) => {
   try {
-    console.log('Creating product, user role:', req.user.role);
-    
-    if (req.user.role !== 'seller') {
-      return res.status(403).json({ message: 'Only sellers can create products' });
-    }
-
     if (!req.file) {
       return res.status(400).json({ message: 'Please upload an image' });
     }
-
-    console.log('File uploaded:', req.file);
-    console.log('Request body:', req.body);
 
     const imageUrl = `/uploads/${req.file.filename}`;
 
@@ -91,32 +83,24 @@ router.post('/', protect, upload.single('image'), async (req, res) => {
       description: req.body.description,
       price: Number(req.body.price),
       image: imageUrl,
+      seller: req.user._id,
       store: {
         id: req.user._id,
         name: req.user.name || 'Unknown Seller'
-      },
-      seller: req.user._id
+      }
     });
 
-    console.log('Product to save:', product);
-
-    await product.save();
-    console.log('Product saved successfully');
-    
-    res.status(201).json(product);
+    const savedProduct = await product.save();
+    res.status(201).json(savedProduct);
   } catch (error) {
-    console.error('Error creating product:', error);
-    // Delete uploaded file if product creation fails
+    // Clean up uploaded file if product creation fails
     if (req.file) {
       fs.unlink(req.file.path, (err) => {
         if (err) console.error('Error deleting file:', err);
       });
     }
-    res.status(500).json({ 
-      message: 'Error creating product',
-      error: error.message,
-      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
-    });
+    console.error('Error creating product:', error);
+    res.status(500).json({ message: error.message });
   }
 });
 
