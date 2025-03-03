@@ -10,8 +10,10 @@ const { protect } = require('../middleware/auth');
 const storage = multer.diskStorage({
   destination: function (req, file, cb) {
     const uploadDir = path.join(__dirname, '..', 'uploads');
+    // Create uploads directory if it doesn't exist
     if (!fs.existsSync(uploadDir)) {
-      fs.mkdirSync(uploadDir, { recursive: true });
+      fs.mkdirSync(uploadDir);
+      console.log('Created uploads directory at:', uploadDir);
     }
     cb(null, uploadDir);
   },
@@ -21,20 +23,18 @@ const storage = multer.diskStorage({
   }
 });
 
-const fileFilter = (req, file, cb) => {
-  if (file.mimetype.startsWith('image/')) {
-    cb(null, true);
-  } else {
-    cb(new Error('Not an image! Please upload only images.'), false);
-  }
-};
-
 const upload = multer({
   storage: storage,
   limits: {
     fileSize: 5 * 1024 * 1024 // 5MB limit
   },
-  fileFilter: fileFilter
+  fileFilter: (req, file, cb) => {
+    if (file.mimetype.startsWith('image/')) {
+      cb(null, true);
+    } else {
+      cb(new Error('Not an image! Please upload an image.'), false);
+    }
+  }
 });
 
 // Serve static files from uploads directory
@@ -72,9 +72,18 @@ router.get('/my-store', protect, async (req, res) => {
 // Create a new product
 router.post('/', protect, upload.single('image'), async (req, res) => {
   try {
+    console.log('Creating product, user role:', req.user.role);
+    
+    if (req.user.role !== 'seller') {
+      return res.status(403).json({ message: 'Only sellers can create products' });
+    }
+
     if (!req.file) {
       return res.status(400).json({ message: 'Please upload an image' });
     }
+
+    console.log('Uploaded file:', req.file);
+    console.log('Request body:', req.body);
 
     const imageUrl = `/uploads/${req.file.filename}`;
 
@@ -83,24 +92,30 @@ router.post('/', protect, upload.single('image'), async (req, res) => {
       description: req.body.description,
       price: Number(req.body.price),
       image: imageUrl,
-      seller: req.user._id,
       store: {
         id: req.user._id,
         name: req.user.name || 'Unknown Seller'
-      }
+      },
+      seller: req.user._id
     });
+
+    console.log('Product to save:', product);
 
     const savedProduct = await product.save();
     res.status(201).json(savedProduct);
   } catch (error) {
-    // Clean up uploaded file if product creation fails
+    console.error('Error creating product:', error);
+    // Delete uploaded file if product creation fails
     if (req.file) {
       fs.unlink(req.file.path, (err) => {
         if (err) console.error('Error deleting file:', err);
       });
     }
-    console.error('Error creating product:', error);
-    res.status(500).json({ message: error.message });
+    res.status(500).json({ 
+      message: 'Error creating product',
+      error: error.message,
+      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+    });
   }
 });
 
@@ -113,20 +128,20 @@ router.put('/:id', protect, upload.single('image'), async (req, res) => {
       return res.status(404).json({ message: 'Product not found' });
     }
 
-    if (product.store.toString() !== req.user._id.toString()) {
-      return res.status(403).json({ message: 'Not authorized' });
+    if (product.seller.toString() !== req.user._id.toString()) {
+      return res.status(403).json({ message: 'Not authorized to update this product' });
     }
 
     const updateData = {
       name: req.body.name,
       description: req.body.description,
-      price: req.body.price
+      price: Number(req.body.price)
     };
 
     if (req.file) {
       // Delete old image if it exists
       if (product.image) {
-        const oldImagePath = path.join(__dirname, '..', product.image.replace('/api/products', ''));
+        const oldImagePath = path.join(__dirname, '..', product.image);
         fs.unlink(oldImagePath, (err) => {
           if (err) console.error('Error deleting old image:', err);
         });
@@ -142,8 +157,14 @@ router.put('/:id', protect, upload.single('image'), async (req, res) => {
 
     res.json(updatedProduct);
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ message: 'Server error' });
+    console.error('Error updating product:', error);
+    // Delete uploaded file if update fails
+    if (req.file) {
+      fs.unlink(req.file.path, (err) => {
+        if (err) console.error('Error deleting file:', err);
+      });
+    }
+    res.status(500).json({ message: 'Error updating product' });
   }
 });
 
